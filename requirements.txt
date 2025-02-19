@@ -1,0 +1,5 @@
+openai==1.63.2
+schedule==1.2.2
+telebot==0.0.5
+python-dotenv==1.0.1
+pandas==2.2.3
