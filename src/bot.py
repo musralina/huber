@@ -1,15 +1,17 @@
 import os
-
 import openai
 import logging
 import schedule
 import time
 import telebot
-from datetime import datetime
+from datetime import datetime, timedelta
+import pytz
 from dotenv import load_dotenv
 load_dotenv()
 from process_csv import Process
 
+
+ALMATY_TZ = pytz.timezone("Asia/Almaty")
 # Configuration
 TELEGRAM_BOT_TOKEN = os.getenv('BOT_TOKEN')
 #OPENAI_API_KEY = os.getenv('BOT_TOKEN')
@@ -40,12 +42,13 @@ def generate_report(data_summary):
     prompt = f"Analyze the following data summary and provide insights: {data_summary}"
     response = client.chat.completions.create(
         model="gpt-4",
-        messages=[{"role": "system", "content": "You are a marketing specialist assistant. Answer always short and only in Russian language"},
+        messages=[{"role": "system", "content": "You are a marketing specialist assistant. Calculate the best and the worse employee, based on their generated revenue as well. Answer always only in Russian language based on provided information for each employee, provide all numbers. "},
                   {"role": "user", "content": prompt}]
     )
     return response.choices[0].message.content.strip()
 
 def send_report_day():
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%d.%m.%Y")
     """Processes CSV, generates a report, and sends it to Telegram."""
     chat_id = get_chat_id()
     if not chat_id:
@@ -56,28 +59,41 @@ def send_report_day():
     if df_day is None:
         logging.error("Failed to read CSV file. Skipping report generation.")
         return  # Stop execution
-    
     logging.info("Processing CSV file...")
-    total_revenue = Process.calculate_total_revenue(df_day)
+    total_revenue, margin = Process.calculate_total_revenue(df_day)
     total_revenue_per_employee = Process.calculate_revenue_per_employee(df_day)
-    
+    deal_counts = Process.count_deal_stages(df_day)
+    employee_activity = Process.calculate_employee_activity(df_day)
+
     logging.info("Generating report...")
-    data_summary = f"Total revenue: {total_revenue} and Revenue per employee: {total_revenue_per_employee}"
+    data_summary = f"""Total revenue: {total_revenue}, с маржинальностью в 20% равную {margin} and Revenue per employee: {total_revenue_per_employee}. Количество успешных и проваленных сделок: {deal_counts}, Сводная активность сотрудников:{employee_activity} """
     report = generate_report(data_summary)
     
     logging.info("Sending report to Telegram...")
-    bot.send_message(chat_id, f"Ежедневный отчёт:\n{report}")
+    bot.send_message(chat_id, f"Ежедневный отчёт за {yesterday}:\n{report}")
 
+
+def schedule_task():
+    now = datetime.now(ALMATY_TZ)
+    schedule_time = "06:00"
+
+    # Convert the scheduled time to Almaty timezone
+    target_time = ALMATY_TZ.localize(datetime.strptime(schedule_time, "%H:%M")).time()
+
+    print(f"Scheduling task at {schedule_time} Almaty time (server time: {now.strftime('%Y-%m-%d %H:%M:%S')})")
+    
+    schedule.every().day.at(schedule_time).do(send_report_day)
 
 # Send report immediately for testing
 send_report_day()
+schedule_task()
 
 # Schedule the report every day at 00:00
-schedule.every().day.at("00:00").do(send_report_day)
+
 
 logging.info("Bot started. Waiting for scheduled tasks...")
 
 # Run the scheduler loop
 while True:
     schedule.run_pending()
-    time.sleep(60)
+    time.sleep(30)
