@@ -28,23 +28,32 @@ class Process:
         df["price"] = df["price"].replace(",", "", regex=True).astype(float)
         total = df["price"].sum()
         margin = calculate_margin(total)
-        return total, margin
+        return float(total), float(margin)
 
     @staticmethod
     def calculate_revenue_per_employee(df):
-        """Calculates, prints, and returns the total revenue for each employee, excluding 'Биржа заявок'."""
-        if "Ответственный" not in df.columns or "price" not in df.columns:
-            logging.error("Required columns not found in CSV file!")
+        """Calculates the total revenue per employee and returns a dictionary."""
+        if "contact_responsible_user_id" not in df.columns or "price" not in df.columns:
+            logging.error("Required columns not found!")
             return None
         
-        # Исключаем строки, где "Ответственный" == "Биржа заявок"
         df_filtered = df[df["contact_responsible_user_id"] != "Биржа заявок"]
-        
-        revenue_per_employee = df_filtered.groupby("contact_responsible_user_id")["price"].sum()
-        
-        formatted_revenue = {employee: f"{revenue:,.2f} ₸" for employee, revenue in revenue_per_employee.items()}
-
-        return formatted_revenue
+        revenue_per_employee = df_filtered.groupby("contact_responsible_user_id")["price"].sum().to_dict()
+        return revenue_per_employee
+    
+    @staticmethod
+    def get_deals_details(df, statuses, deal_type):
+        """Extracts deal details for successful or failed deals."""
+        deals = df[df['status_id'].isin(statuses)]
+        details = {
+            f"{deal_type}_id": ';'.join(deals['id'].astype(str)),
+            f"{deal_type}_name": ';'.join(deals['name'].astype(str)),
+            f"{deal_type}_price": ';'.join(deals['price'].astype(str)),
+            f"{deal_type}_created_at": ';'.join(deals['created_at'].astype(str)),
+            f"{deal_type}_updated_at": ';'.join(deals['updated_at'].astype(str)),
+            f"{deal_type}_responsible_user_id": ';'.join(deals['contact_responsible_user_id'].astype(str)),
+        }
+        return details
 
     @staticmethod
     def count_deal_stages(df):

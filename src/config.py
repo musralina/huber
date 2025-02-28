@@ -6,6 +6,8 @@ TEMP_FILE = "temp.xlsx"
 FILE_URL = "https://amo.promoweb.kz/amo.xlsx"
 CSV_FILE = "data/amocrm18fev.csv"
 TEMP_FILE = "temp.xlsx"
+# config.py
+CUMULATIVE_JSON = "data/cumulative_report.json"
 
 
 # Статусы сделок
@@ -17,3 +19,4 @@ DEAL_STATUSES = {
 
 # Маржинальность
 MARGIN_PERCENTAGE = 0.2
+
