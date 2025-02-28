@@ -246,7 +246,7 @@ def generate_historical_data():
     
 # generate_historical_data()    
 send_report_day()
-schedule.every().day.at("00:00").do(send_report_day)
+schedule.every().day.at("01:00").do(send_report_day)
 logging.info("Bot started. Waiting for scheduled tasks...")
 while True:
     schedule.run_pending()
