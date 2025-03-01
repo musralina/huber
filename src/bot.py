@@ -9,9 +9,14 @@ import pandas as pd
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from process_csv import Process
-from config import format_russian_date, TEMP_FILE, FILE_URL, CSV_FILE, DEAL_STATUSES, CUMULATIVE_JSON
+from config import generate_report, convert_to_python_types, TEMP_FILE, FILE_URL, CSV_FILE, DEAL_STATUSES, CUMULATIVE_JSON
 import json
 import numpy as np
+from langchain.chat_models import ChatOpenAI
+from langchain.agents import create_json_agent
+from langchain.agents.agent_toolkits import JsonToolkit
+from langchain.tools.json.tool import JsonSpec
+import threading
 
 
 load_dotenv()
@@ -71,28 +76,6 @@ def get_chat_id():
         logging.error("No chat updates found!")
         return None
 
-def generate_report(data_summary):
-    """Generates a report using OpenAI API."""
-    prompt = f"""Analyze the following data summary and provide insights with the following structure: 
-    1. Общая выручка за вчерашний день, сумма продаж (оборот), пример: Общий оборот отдела продаж за вчерашний день: 1 000 000 тенге или (10 продаж)
-    2. Маржинальность 20%, напрмиер: Оборот за прошлый день: 1 000 000 тенге, прибыль 200 000 (20%)
-    3. Количество успешных/проваленных сделок (здесь значения количественные, например 10 сделок успешных, 20 проваленных (закрыто нереализовано))
-    4. Лучший и худший сотрудник считается только по количеству успешных сделок: {data_summary['successful_deals']}, при равном количестве учитывать сумму сделок. 
-    Если и сумма, и количество у всех сотрудников равны, то нет худшего сутрудника, и нужно указать что они показали одинаковые результаты. 
-    Наихудший сотрдник тот, кто показал наименьшее количество успешных сделок c продажами.
-    Один и тот же сотрудник не может быть и лучшим и худшим сотрудником. Всегда указывай сумму сделок вместе с количеством.
-    5. Сводная активность сотрудников (количество изменений в сделках). Например, Сколько взял новых сделок и сколько закрыл сделок
-    6. Анализ эффективности по каждому сотруднику всегда зависит от количества успешных сделок каждого сотрудника: и считается по следующей формуле: (количество успешных сделок сотрудника)/(количество всех взятых сделок для сотрудника)*100)
-Все данные бери отсюда:
-    {data_summary}"""
-    response = client.chat.completions.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": "You are a marketing specialist assistant. Calculate the best and worst employee based on their generated revenue. Answer always in Russian."},
-            {"role": "user", "content": prompt}
-        ]
-    )
-    return response.choices[0].message.content.strip()
 
 def send_report_day():
     """Processes CSV, generates a report, and sends it to Telegram."""
@@ -136,24 +119,6 @@ def send_report_day():
     logging.info("Sending report to Telegram...")
     bot.send_message(chat_id, f"Ежедневный отчёт:\n{report}")
     save_cumulative_json(df_day, yesterday, total_revenue, margin, total_revenue_per_employee, deal_counts, employee_activity)  # Updated function call
-
-
-def convert_to_python_types(obj):
-    """Converts numpy/pandas types to native Python types for JSON serialization."""
-    if isinstance(obj, (pd.Timestamp, datetime)):
-        return obj.strftime('%Y-%m-%d')
-    elif isinstance(obj, (np.integer, np.int64)):
-        return int(obj)
-    elif isinstance(obj, (np.floating, np.float64)):
-        return float(obj)
-    elif isinstance(obj, pd.Series):
-        return obj.to_dict()
-    elif isinstance(obj, dict):
-        return {k: convert_to_python_types(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [convert_to_python_types(item) for item in obj]
-    else:
-        return obj
 
 
 def save_cumulative_json(df_day, date, total_revenue, margin, total_revenue_per_employee, deal_counts, employee_activity):
@@ -244,11 +209,137 @@ def generate_historical_data():
     except Exception as e:
         logging.error(f"Error processing historical data: {e}")
 
+
+@bot.message_handler(func=lambda message: True)
+def handle_message(message):
+    """Handles user questions, retrieves raw data, and processes with OpenAI."""
+    try:
+        user_question = message.text
+        chat_id = message.chat.id
+        
+        bot.send_message(chat_id, "Обрабатываю ваш запрос...")
+        agent = setup_json_agent()
+        
+        if not agent:
+            bot.send_message(chat_id, "Данные временно недоступны. Попробуйте позже.")
+            return
+
+        # Step 1: Get raw data using modified question
+        retrieval_prompt = f"""
+        В JSON-файле содержатся данные за последние 3 месяца.  
+            Дата указана в ключе `updated_at` в формате `yyyy-mm-dd`.  
+            Для определения и расчёета периода используйте этот ключ.
+            В deal_counts содержится информация по всем сделкам за день: Успешным сделкам, Проваленным сделкам и Сделкам в работе.
+
+            - Извлеките **только сырые данные**, без выполнения каких-либо вычислений.  
+            - Значения прибыли за указанный день находятся в ключе `total_revenue`.  
+            - Если в запросе указан конкретный период, извлеки данные по соответствующим дням и месяцам, учитывая формат `yyyy-mm-dd`.
+            Если запрашивается период за последние 10 дней, то нужно считать начиная со вчерашнего дня в формате yyyy-mm-dd, и не раньше вем (yyyy-mm-dd - 10 дней)
+            Если есть данные только за меньшее количество дней чем запрашиваемый период, то вытащи за все дни информацию не меньше и не больше запрашиваемого периода.
+            Если вчера было 2025-03-01, то нужно отнять от первого марта 2025-го года 10 дней и вытащить информацию только за период с 19-го февраля.
+
+            Верните **только фактические значения** из данных в исходном виде.  
+            **Вопрос:** {user_question}
+
+        """
+        
+        try:
+            raw_data = agent.run(retrieval_prompt)
+        except Exception as e:
+            logging.error(f"Data retrieval failed: {e}")
+            bot.send_message(chat_id, "Ошибка при получении данных.")
+            return
+
+        # Step 2: Process data with OpenAI
+        analysis_prompt = f"""
+        Проанализируй данные и ответь на вопрос на русском языке. 
+        Всегда прибыль считай в тенге.
+        Обязательно выполни все необходимые расчеты. 
+        Если в данных есть временные метки, учитывай их при анализе.
+        
+        Вопрос: {user_question}
+        Данные: {raw_data}
+        
+        Формат ответа:
+        - Краткий вывод в начале
+        - Подробное объяснение с расчетами
+        - Основные выводы в конце
+        """
+        
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "Ты финансовый аналитик. Отвечай на русском."},
+                {"role": "user", "content": analysis_prompt}
+            ],
+            temperature=0.1
+        )
+        
+        final_answer = response.choices[0].message.content.strip()
+        bot.send_message(chat_id, final_answer)
+
+    except Exception as e:
+        logging.error(f"Error handling message: {e}")
+        bot.send_message(chat_id, "Произошла ошибка. Пожалуйста, попробуйте еще раз.")
+
+def setup_json_agent():
+    """Improved JSON agent initialization with data validation"""
+    try:
+        if not os.path.exists(CUMULATIVE_JSON):
+            raise FileNotFoundError("Cumulative JSON file missing")
+            
+        with open(CUMULATIVE_JSON, "r", encoding='utf-8') as f:
+            data = json.load(f)
+            
+        # Transform data structure
+        processed_data = {}
+        for entry in data:
+            for key, value in entry.items():
+                if key not in processed_data:
+                    processed_data[key] = []
+                processed_data[key].append(value)
+                
+        # Enhanced data validation
+        required_keys = ['total_revenue', 'updated_at', 'margin', 'successful_deals_price', 'total_revenue_per_employee', 'deal_counts', 'employee_activity']
+        for key in required_keys:
+            if key not in processed_data:
+                raise ValueError(f"Missing required key in data: {key}")
+
+        spec = JsonSpec(dict_=processed_data, max_value_length=10000)
+        toolkit = JsonToolkit(spec=spec)
+        
+        return create_json_agent(
+            llm=ChatOpenAI(
+                temperature=0,
+                model="gpt-4-1106-preview",  # Use latest model
+                openai_api_key=OPENAI_API_KEY,
+                max_tokens=1000
+            ),
+            toolkit=toolkit,
+            max_iterations=500,
+            handle_parsing_errors=True
+        )
+        
+    except Exception as e:
+        logging.error(f"Agent setup failed: {str(e)}")
+        return None
+
+
+def start_bot():
+    """Starts the Telegram bot in polling mode."""
+    bot.infinity_polling()
+
+if __name__ == "__main__":
+    #generate_historical_data()
+    send_report_day()
+    schedule.every().day.at("01:00").do(send_report_day)
     
-generate_historical_data()    
-send_report_day()
-schedule.every().day.at("01:00").do(send_report_day)
-logging.info("Bot started. Waiting for scheduled tasks...")
-while True:
-    schedule.run_pending()
-    time.sleep(60)
+    # Start bot in a separate thread
+    bot_thread = threading.Thread(target=start_bot)
+    bot_thread.daemon = True
+    bot_thread.start()
+    
+    logging.info("Bot started. Listening for messages and running scheduled tasks...")
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
