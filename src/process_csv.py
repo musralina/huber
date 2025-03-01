@@ -33,12 +33,12 @@ class Process:
     @staticmethod
     def calculate_revenue_per_employee(df):
         """Calculates the total revenue per employee and returns a dictionary."""
-        if "contact_responsible_user_id" not in df.columns or "price" not in df.columns:
+        if "responsible_user_id" not in df.columns or "price" not in df.columns:
             logging.error("Required columns not found!")
             return None
         
-        df_filtered = df[df["contact_responsible_user_id"] != "Биржа заявок"]
-        revenue_per_employee = df_filtered.groupby("contact_responsible_user_id")["price"].sum().to_dict()
+        df_filtered = df[df["responsible_user_id"] != "Биржа заявок"]
+        revenue_per_employee = df_filtered.groupby("responsible_user_id")["price"].sum().to_dict()
         return revenue_per_employee
     
     @staticmethod
@@ -51,7 +51,7 @@ class Process:
             f"{deal_type}_price": ';'.join(deals['price'].astype(str)),
             f"{deal_type}_created_at": ';'.join(deals['created_at'].astype(str)),
             f"{deal_type}_updated_at": ';'.join(deals['updated_at'].astype(str)),
-            f"{deal_type}_responsible_user_id": ';'.join(deals['contact_responsible_user_id'].astype(str)),
+            f"{deal_type}_responsible_user_id": ';'.join(deals['responsible_user_id'].astype(str)),
         }
         return details
 
@@ -83,7 +83,7 @@ class Process:
     def calculate_employee_activity(df):
         """Подсчитывает активность сотрудников: взятые, закрытые и нереализованные сделки."""
         
-        if "contact_responsible_user_id" not in df.columns or "updated_at" not in df.columns or "closed_at" not in df.columns:
+        if "responsible_user_id" not in df.columns or "updated_at" not in df.columns or "closed_at" not in df.columns:
             logging.error("Отсутствуют необходимые колонки!")
             return None
         # df["closed_at"] = df["closed_at"].replace("не закрыта", pd.NA)
@@ -92,7 +92,7 @@ class Process:
         df["closed_at"] = pd.to_datetime(df["closed_at"], format="%d.%m.%Y %H:%M:%S", errors="coerce")
 
         # Отбираем сделки, которые были переведены с "Биржа заявок" на конкретного сотрудника
-        df["Количество сделок, взятые в работу сотрудником"] = (df["contact_responsible_user_id"] != "Биржа заявок")
+        df["Количество сделок, взятые в работу сотрудником"] = (df["responsible_user_id"] != "Биржа заявок")
 
         # Закрытые сделки (есть дата закрытия)
         df["closed_at"] = df["closed_at"].notna()
@@ -101,7 +101,7 @@ class Process:
         df["Закрытая и Нереализованная сделка"] = df["closed_at"] & (df["status_id"] == "ЗАКРЫТО И НЕ РЕАЛИЗОВАНО")
 
         # Группируем по ответственным сотрудникам
-        activity_summary = df.groupby("contact_responsible_user_id").agg(
+        activity_summary = df.groupby("responsible_user_id").agg(
             {"Количество сделок, взятые в работу сотрудником": "sum", "Закрытая и Нереализованная сделка": "sum"}
         )
         print(activity_summary)
